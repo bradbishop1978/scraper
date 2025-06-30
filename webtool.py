@@ -271,7 +271,7 @@ def main():
                 
             else:
                 st.error("❌ No locations were extracted. This might be because:")
-                st.markdown("""
+                st.markdown(""
                 - The website loads content dynamically with JavaScript
                 - The CSS selector is incorrect
                 - The website blocks automated requests
