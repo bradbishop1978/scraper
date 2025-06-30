@@ -1,4 +1,7 @@
-streamlit
-pandas
-requests
-beautifulsoup4
+# Hunt Brothers Complete Scraper Requirements
+streamlit>=1.28.0
+selenium>=4.15.0
+pandas>=1.5.0
+
+# Optional: For better browser management
+webdriver-manager>=4.0.0
