@@ -310,3 +310,5 @@ def main():
         
         ```bash
         pip install selenium
+        ```
+        """)
