@@ -133,6 +133,7 @@ def parse_hunt_brothers_html(html_content):
         # Find the end of the container by counting div tags
         div_count = 1
         search_pos = list_start + len('<div class="hbp-location-list">')
+        list_end = len(html_content)
         
         while div_count > 0 and search_pos < len(html_content):
             next_open = html_content.find('<div', search_pos)
@@ -230,7 +231,7 @@ def parse_single_location(location_html, latitude, longitude, index):
     except Exception as e:
         return None
 
-def generate_search_terms():
+def generate_search_terms(intensity="standard"):
     """Create a list of search terms to find all locations"""
     
     # States where Hunt Brothers operates
@@ -254,8 +255,13 @@ def generate_search_terms():
         "72201", "63101", "27601", "29201", "23219", "25301"
     ]
     
-    # Combine all search terms
-    search_terms = [""] + states + cities[:10] + zip_codes[:5]  # Limit for efficiency
+    # Adjust search terms based on intensity
+    if intensity == "quick":
+        search_terms = [""] + states[:5] + cities[:3] + zip_codes[:2]
+    elif intensity == "standard":
+        search_terms = [""] + states[:10] + cities[:8] + zip_codes[:5]
+    else:  # comprehensive
+        search_terms = [""] + states + cities[:15] + zip_codes
     
     return search_terms
 
@@ -289,6 +295,20 @@ def create_sample_data():
             'distance': '7274.34 miles',
             'fullAddress': '2205 HWY 47, HARDIN, MT 59034',
             'elementIndex': 1
+        },
+        {
+            'locationId': '169248',
+            'storeName': 'CENEX ZIP TRIP #52',
+            'address': '1201 CENTRAL AVE',
+            'city': 'BILLINGS',
+            'state': 'MT',
+            'zipCode': '59102',
+            'phone': '(406) 245-9670',
+            'latitude': '45.770052',
+            'longitude': '-108.546965',
+            'distance': '7242.61 miles',
+            'fullAddress': '1201 CENTRAL AVE, BILLINGS, MT 59102',
+            'elementIndex': 2
         }
     ]
 
@@ -302,13 +322,258 @@ def main():
     st.title("🍕 Hunt Brothers Pizza - Complete Location Scraper")
     st.markdown("**With Browser Automation** - Extracts ALL locations automatically!")
     
-    # Check if Selenium is available
-    if not SELENIUM_AVAILABLE:
-        st.error("🤖 **Browser Automation Not Available**")
-        st.markdown("""
-        To use the complete scraper with browser automation, you need to install Selenium:
+    # Sidebar for settings
+    with st.sidebar:
+        st.header("⚙️ Settings")
         
-        ```bash
-        pip install selenium
-        ```
+        demo_mode = st.checkbox("🎭 Demo Mode", value=True, help="Use sample data for testing")
+        
+        if not demo_mode:
+            if not SELENIUM_AVAILABLE:
+                st.error("🤖 Browser automation not available!")
+                st.code("pip install selenium")
+                st.stop()
+            
+            search_intensity = st.selectbox(
+                "🔍 Search Intensity",
+                ["quick", "standard", "comprehensive"],
+                index=1,
+                help="Quick: ~50-100 locations, Standard: ~200-500 locations, Comprehensive: ~500+ locations"
+            )
+            
+            show_browser = st.checkbox("👁️ Show Browser Window", help="Watch the robot work (slower)")
+        
+        with st.expander("📖 How It Works"):
+            st.markdown("""
+            **The Robot Process:**
+            1. 🤖 Opens Chrome browser
+            2. 🌐 Goes to Hunt Brothers website  
+            3. 🔍 Searches different states/cities
+            4. ⏳ Waits for locations to load
+            5. 📊 Extracts all location data
+            6. 💾 Gives you CSV/JSON files
+            """)
+    
+    # Main content
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.header("📊 Robot Scraper")
+        
+        if st.button("🚀 Start Robot Scraper", type="primary", use_container_width=True):
+            if demo_mode:
+                st.info("🎭 Using demo data to show you what the robot can do...")
+                locations = create_sample_data()
+                
+                # Simulate progress for demo
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                demo_steps = [
+                    "🤖 Robot is opening Hunt Brothers website...",
+                    "🔍 Robot found the search box!",
+                    "🤖 Robot is searching for: 'Tennessee' (1/5)",
+                    "🤖 Robot is searching for: 'Kentucky' (2/5)",
+                    "🤖 Robot is searching for: 'Alabama' (3/5)",
+                    "🤖 Robot is searching for: 'Georgia' (4/5)",
+                    "🤖 Robot is searching for: 'Louisiana' (5/5)",
+                    "🎉 Robot finished! Extracting location data...",
+                ]
+                
+                for i, step in enumerate(demo_steps):
+                    status_text.text(step)
+                    progress_bar.progress((i + 1) / len(demo_steps))
+                    time.sleep(0.5)
+                
+                status_text.text("✅ Demo completed!")
+                
+            else:
+                # Real robot scraping
+                with st.spinner("Starting browser robot..."):
+                    driver = setup_browser()
+                    
+                    if not driver:
+                        st.error("Could not start browser robot!")
+                        st.stop()
+                
+                try:
+                    # Create progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Generate search terms
+                    search_terms = generate_search_terms(search_intensity)
+                    
+                    # Robot performs searches
+                    success = robot_search_locations(driver, search_terms, progress_bar, status_text)
+                    
+                    if success:
+                        status_text.text("🤖 Robot is extracting location data...")
+                        
+                        # Robot extracts HTML
+                        html_content = robot_extract_html(driver)
+                        
+                        if html_content:
+                            # Parse the extracted HTML
+                            locations = parse_hunt_brothers_html(html_content)
+                        else:
+                            locations = []
+                    else:
+                        locations = []
+                        
+                finally:
+                    # Always close the browser
+                    driver.quit()
+                    status_text.text("🤖 Robot finished and browser closed!")
+            
+            # Display results
+            if locations:
+                st.success(f"🎉 Robot found {len(locations)} Hunt Brothers locations!")
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(locations)
+                
+                # Display data table
+                st.dataframe(df, use_container_width=True, height=400)
+                
+                # Statistics
+                col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
+                
+                with col_stats1:
+                    st.metric("Total Locations", len(locations))
+                
+                with col_stats2:
+                    unique_states = len(set(loc.get('state', '') for loc in locations if loc.get('state')))
+                    st.metric("States", unique_states)
+                
+                with col_stats3:
+                    with_coords = len([l for l in locations if l.get('latitude') and l.get('longitude')])
+                    st.metric("With Coordinates", with_coords)
+                
+                with col_stats4:
+                    with_phones = len([l for l in locations if l.get('phone')])
+                    st.metric("With Phone Numbers", with_phones)
+                
+                # Sample locations display
+                st.subheader("📍 Sample Locations")
+                for i, location in enumerate(locations[:3]):
+                    with st.expander(f"📍 {location.get('storeName', 'Unknown Store')}"):
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.write(f"**ID:** {location.get('locationId', 'N/A')}")
+                            st.write(f"**Address:** {location.get('address', 'N/A')}")
+                            st.write(f"**City:** {location.get('city', 'N/A')}, {location.get('state', 'N/A')} {location.get('zipCode', 'N/A')}")
+                            st.write(f"**Phone:** {location.get('phone', 'N/A')}")
+                        with col_b:
+                            st.write(f"**Coordinates:** {location.get('latitude', 'N/A')}, {location.get('longitude', 'N/A')}")
+                            st.write(f"**Distance:** {location.get('distance', 'N/A')}")
+                
+                # Download options
+                st.subheader("💾 Download Your Data")
+                
+                col_dl1, col_dl2 = st.columns(2)
+                
+                with col_dl1:
+                    # CSV download
+                    csv_headers = ["Location ID", "Store Name", "Address", "City", "State", "ZIP", "Phone", "Latitude", "Longitude", "Distance"]
+                    csv_rows = []
+                    for loc in locations:
+                        csv_rows.append([
+                            loc.get('locationId', ''),
+                            loc.get('storeName', ''),
+                            loc.get('address', ''),
+                            loc.get('city', ''),
+                            loc.get('state', ''),
+                            loc.get('zipCode', ''),
+                            loc.get('phone', ''),
+                            loc.get('latitude', ''),
+                            loc.get('longitude', ''),
+                            loc.get('distance', '')
+                        ])
+                    
+                    csv_content = ",".join(csv_headers) + "\n"
+                    for row in csv_rows:
+                        csv_content += ",".join(f'"{str(field)}"' for field in row) + "\n"
+                    
+                    st.download_button(
+                        label="📄 Download CSV File",
+                        data=csv_content,
+                        file_name=f"hunt_brothers_locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+                with col_dl2:
+                    # JSON download
+                    json_data = json.dumps(locations, indent=2)
+                    st.download_button(
+                        label="📋 Download JSON File",
+                        data=json_data,
+                        file_name=f"hunt_brothers_locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
+            
+            else:
+                st.error("❌ Robot couldn't find any locations.")
+                if not demo_mode:
+                    st.markdown("""
+                    **Possible issues:**
+                    - Website might have changed
+                    - Network connectivity problems
+                    - Browser automation blocked
+                    
+                    **Try:**
+                    - Enable Demo Mode first
+                    - Check your internet connection
+                    - Try again in a few minutes
+                    """)
+    
+    with col2:
+        st.header("🤖 About the Robot")
+        
+        if SELENIUM_AVAILABLE:
+            st.success("✅ Browser automation ready!")
+        else:
+            st.error("❌ Browser automation not available")
+            st.code("pip install selenium")
+        
+        with st.expander("🎯 What the Robot Does", expanded=True):
+            st.markdown("""
+            **Step-by-step process:**
+            
+            1. 🤖 **Opens Chrome browser**
+            2. 🌐 **Goes to Hunt Brothers website**
+            3. 🔍 **Searches for different locations:**
+               - All 21 states where they operate
+               - Major cities in each state
+               - Key zip codes
+            4. ⏳ **Waits for each search to load**
+            5. 📊 **Extracts all location data**
+            6. 💾 **Creates your CSV/JSON files**
+            """)
+        
+        with st.expander("⚙️ Setup Requirements"):
+            st.markdown("""
+            **What you need:**
+            - ✅ Python installed
+            - ✅ Chrome browser installed
+            - ✅ Internet connection
+            - ✅ Selenium library (`pip install selenium`)
+            
+            **That's it!** The robot handles everything else.
+            """)
+        
+        st.header("🎯 Expected Results")
+        st.markdown("""
+        **You should get:**
+        - 🏪 **Hundreds** of real Hunt Brothers locations
+        - 📍 **Exact addresses** and GPS coordinates  
+        - 📞 **Phone numbers** for each location
+        - 📊 **CSV/JSON** files ready for use
+        
+        **Data quality:** Real store names like "CENEX ZIP TRIP #50" and actual addresses.
         """)
+
+if __name__ == "__main__":
+    main()
