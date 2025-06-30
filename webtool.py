@@ -1,276 +1,156 @@
 import streamlit as st
 import pandas as pd
-import time
-import re
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import requests
 from bs4 import BeautifulSoup
+import re
 import json
 from datetime import datetime
 import io
+import time
 
-def setup_driver(headless=True):
-    """Setup Chrome WebDriver with options"""
-    chrome_options = Options()
-    if headless:
-        chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-    
+def extract_locations_from_html(html_content, css_selector):
+    """Extract location data from HTML using BeautifulSoup"""
     try:
-        driver = webdriver.Chrome(options=chrome_options)
-        return driver
-    except Exception as e:
-        st.error(f"Failed to setup Chrome driver: {str(e)}")
-        return None
-
-def extract_locations_from_element(driver, js_selector):
-    """Extract location data from the specified DOM element"""
-    try:
-        # Execute JavaScript to get the element and its content
-        script = f"""
-        const element = {js_selector};
-        if (!element) return null;
+        soup = BeautifulSoup(html_content, 'html.parser')
         
-        const locations = [];
-        const children = element.children || element.querySelectorAll('*');
+        # Convert CSS selector to BeautifulSoup format
+        # Remove document.querySelector() wrapper if present
+        if 'document.querySelector' in css_selector:
+            # Extract the CSS selector from JavaScript
+            match = re.search(r'querySelector\(["\']([^"\']+)["\']', css_selector)
+            if match:
+                css_selector = match.group(1)
         
-        Array.from(children).forEach((child, index) => {{
-            const text = child.textContent || child.innerText || '';
-            const html = child.innerHTML || '';
+        # Find the target element
+        target_element = soup.select_one(css_selector)
+        
+        if not target_element:
+            st.warning(f"Could not find element with selector: {css_selector}")
+            return []
+        
+        locations = []
+        
+        # Get all child elements that might contain location data
+        children = target_element.find_all(['div', 'li', 'article', 'section'], recursive=True)
+        
+        if not children:
+            children = [target_element]
+        
+        for i, element in enumerate(children):
+            text = element.get_text(strip=True)
             
-            if (text.trim().length > 10) {{ // Only consider elements with substantial text
-                // Extract store name (usually first line or in heading tags)
-                let storeName = '';
-                const headings = child.querySelectorAll('h1, h2, h3, h4, h5, h6, .name, .store-name, .title, strong, b');
-                if (headings.length > 0) {{
-                    storeName = headings[0].textContent.trim();
-                }} else {{
-                    const lines = text.split('\\n').map(line => line.trim()).filter(line => line);
-                    if (lines.length > 0) {{
-                        // Look for lines that look like store names
-                        for (const line of lines) {{
-                            if (line.includes('#') || line.includes("'S") || line.includes('STORE') || 
-                                line.includes('MART') || line.includes('SHOP') || line.includes('MARKET')) {{
-                                storeName = line;
-                                break;
-                            }}
-                        }}
-                        if (!storeName) storeName = lines[0];
-                    }}
-                }}
-                
-                // Extract address
-                let address = '';
-                const addressElements = child.querySelectorAll('.address, .street-address, .addr, .location-address');
-                if (addressElements.length > 0) {{
-                    address = addressElements[0].textContent.trim();
-                }} else {{
-                    const addressMatch = text.match(/\\d+[^,\\n]*(?:HIGHWAY|HWY|STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|BOULEVARD|BLVD)[^,\\n]*/i);
-                    if (addressMatch) {{
-                        address = addressMatch[0].trim();
-                    }}
-                }}
-                
-                // Extract city, state, zip
-                let city = '', state = '', zipCode = '';
-                const cityStateZipMatch = text.match(/([A-Z\\s]+),\\s*([A-Z]{{2}})\\s+(\\d{{5}}(?:-\\d{{4}})?)/g);
-                if (cityStateZipMatch) {{
-                    const parts = cityStateZipMatch[0].split(',');
-                    if (parts.length >= 2) {{
-                        city = parts[0].trim();
-                        const stateZip = parts[1].trim().split(/\\s+/);
-                        if (stateZip.length >= 2) {{
-                            state = stateZip[0];
-                            zipCode = stateZip[1];
-                        }}
-                    }}
-                }}
-                
-                // Extract phone
-                let phone = '';
-                const phoneMatch = text.match(/\$$?\\d{{3}}\$$?[-\\.\\s]?\\d{{3}}[-\\.\\s]?\\d{{4}}/);
-                if (phoneMatch) {{
-                    phone = phoneMatch[0];
-                }}
-                
-                // Extract hours
-                let hours = '';
-                const hoursMatch = text.match(/(?:hours?|open|closed)[^,\\n]*(?:am|pm|24)/gi);
-                if (hoursMatch) {{
-                    hours = hoursMatch[0];
-                }}
-                
-                if (storeName || address || (city && state)) {{
-                    locations.push({{
-                        storeName: storeName || 'Unknown Store',
-                        address: address || '',
-                        city: city || '',
-                        state: state || '',
-                        zipCode: zipCode || '',
-                        phone: phone || '',
-                        hours: hours || '',
-                        fullText: text.substring(0, 300),
-                        elementIndex: index
-                    }});
-                }}
-            }}
-        }});
+            if len(text) < 20:  # Skip elements with too little text
+                continue
+            
+            # Extract store name
+            store_name = ""
+            name_elements = element.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b'])
+            if name_elements:
+                store_name = name_elements[0].get_text(strip=True)
+            else:
+                # Try to find store name patterns
+                lines = text.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if any(keyword in line.upper() for keyword in ['#', "'S", 'STORE', 'MART', 'SHOP', 'MARKET']):
+                        store_name = line
+                        break
+                if not store_name and lines:
+                    store_name = lines[0]
+            
+            # Extract address
+            address = ""
+            address_match = re.search(r'\d+[^,\n]*(?:HIGHWAY|HWY|STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|BOULEVARD|BLVD)[^,\n]*', text, re.IGNORECASE)
+            if address_match:
+                address = address_match.group(0).strip()
+            
+            # Extract city, state, zip
+            city, state, zip_code = "", "", ""
+            city_state_zip_match = re.search(r'([A-Z\s]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)', text)
+            if city_state_zip_match:
+                city = city_state_zip_match.group(1).strip()
+                state = city_state_zip_match.group(2).strip()
+                zip_code = city_state_zip_match.group(3).strip()
+            
+            # Extract phone
+            phone = ""
+            phone_match = re.search(r'$$?\d{3}$$?[-.\s]?\d{3}[-.\s]?\d{4}', text)
+            if phone_match:
+                phone = phone_match.group(0)
+            
+            # Extract hours
+            hours = ""
+            hours_match = re.search(r'(?:hours?|open|closed)[^,\n]*(?:am|pm|24)', text, re.IGNORECASE)
+            if hours_match:
+                hours = hours_match.group(0)
+            
+            # Only add if we have meaningful data
+            if store_name or address or (city and state):
+                locations.append({
+                    'storeName': store_name or 'Unknown Store',
+                    'address': address or '',
+                    'city': city or '',
+                    'state': state or '',
+                    'zipCode': zip_code or '',
+                    'phone': phone or '',
+                    'hours': hours or '',
+                    'fullText': text[:300] if len(text) > 300 else text,
+                    'elementIndex': i
+                })
         
-        return locations;
-        """
-        
-        locations = driver.execute_script(script)
-        return locations if locations else []
+        return locations
         
     except Exception as e:
         st.error(f"Error extracting locations: {str(e)}")
         return []
 
-def perform_searches(driver, search_terms, progress_bar, status_text):
-    """Perform multiple searches to populate the location list"""
-    all_locations = {}
-    
+def fetch_page_content(url):
+    """Fetch page content using requests"""
     try:
-        # Find search input
-        search_input = WebDriverWait(driver, 10).wait(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="text"], input[placeholder*="address"], input[placeholder*="zip"], input[placeholder*="search"]'))
-        )
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         
-        total_searches = len(search_terms)
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
         
-        for i, search_term in enumerate(search_terms):
-            status_text.text(f"Searching: {search_term} ({i+1}/{total_searches})")
-            progress_bar.progress((i + 1) / total_searches)
-            
-            try:
-                # Clear and enter search term
-                search_input.clear()
-                if search_term:
-                    search_input.send_keys(search_term)
-                search_input.send_keys(Keys.RETURN)
-                
-                # Wait for results to load
-                time.sleep(3)
-                
-                # Try to wait for the location list to populate
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "#hbp-location-search > div.hbp-location-list"))
-                    )
-                except TimeoutException:
-                    pass  # Continue even if specific element not found
-                
-            except Exception as e:
-                st.warning(f"Error with search '{search_term}': {str(e)}")
-                continue
-                
-        return True
+        return response.text
         
-    except Exception as e:
-        st.error(f"Error performing searches: {str(e)}")
-        return False
+    except requests.RequestException as e:
+        st.error(f"Error fetching page: {str(e)}")
+        return None
 
-def generate_search_terms():
-    """Generate comprehensive search terms"""
-    states = ["AL", "AR", "FL", "GA", "IL", "IN", "IA", "KS", "KY", "LA", "MS", "MO", "NE", "NC", "OH", "OK", "SC", "TN", "TX", "VA", "WV"]
+def scrape_static_content(url, css_selector):
+    """Scrape static content from a webpage"""
+    st.info(f"🌐 Fetching content from: {url}")
     
-    cities = [
-        "Nashville", "Memphis", "Knoxville", "Chattanooga", "Birmingham", "Montgomery", 
-        "Louisville", "Lexington", "Atlanta", "Augusta", "Jackson", "Gulfport",
-        "Little Rock", "Fort Smith", "St. Louis", "Kansas City", "Charlotte", "Raleigh",
-        "Columbia", "Charleston", "Richmond", "Norfolk", "Huntington", "Columbus",
-        "Indianapolis", "Chicago", "Houston", "Dallas", "Oklahoma City", "Tulsa"
-    ]
-    
-    # Generate some zip codes
-    zip_codes = []
-    for i in range(30000, 40000, 500):  # Southern states zip range
-        zip_codes.append(str(i))
-    for i in range(70000, 73000, 500):  # Louisiana, Arkansas
-        zip_codes.append(str(i))
-    
-    # Combine all search terms
-    search_terms = ["", "*"] + states + cities + zip_codes[:20]  # Limit zip codes for efficiency
-    
-    return search_terms
-
-def scrape_website(url, js_selector, search_strategy="comprehensive"):
-    """Main scraping function"""
-    driver = setup_driver(headless=True)
-    if not driver:
+    html_content = fetch_page_content(url)
+    if not html_content:
         return None
     
-    try:
-        st.info(f"🌐 Navigating to: {url}")
-        driver.get(url)
-        
-        # Wait for page to load
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
-        
-        time.sleep(3)  # Additional wait for dynamic content
-        
-        if search_strategy == "comprehensive":
-            st.info("🔍 Performing comprehensive searches to populate location data...")
-            
-            # Create progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            search_terms = generate_search_terms()
-            success = perform_searches(driver, search_terms, progress_bar, status_text)
-            
-            if not success:
-                st.warning("Some searches failed, but continuing with extraction...")
-        
-        st.info(f"📊 Extracting data from DOM element: {js_selector}")
-        
-        # Extract locations from the specified DOM element
-        locations = extract_locations_from_element(driver, js_selector)
-        
-        if not locations:
-            st.warning("No locations found. Trying alternative extraction method...")
-            
-            # Alternative: get all text content and try to parse it
-            try:
-                page_source = driver.page_source
-                soup = BeautifulSoup(page_source, 'html.parser')
-                
-                # Look for any elements that might contain location data
-                potential_elements = soup.find_all(text=re.compile(r'\d{5}'))  # Find elements with zip codes
-                
-                st.info(f"Found {len(potential_elements)} elements with potential location data")
-                
-            except Exception as e:
-                st.error(f"Alternative extraction failed: {str(e)}")
-        
-        return locations
-        
-    except Exception as e:
-        st.error(f"Scraping failed: {str(e)}")
-        return None
-    finally:
-        driver.quit()
+    st.info(f"📊 Extracting data using selector: {css_selector}")
+    
+    locations = extract_locations_from_html(html_content, css_selector)
+    
+    return locations
 
 def main():
     st.set_page_config(
-        page_title="Universal Location Scraper",
+        page_title="Simple Location Scraper",
         page_icon="🎯",
         layout="wide"
     )
     
-    st.title("🎯 Universal Location Scraper")
-    st.markdown("Extract location data from any website using JavaScript DOM selectors")
+    st.title("🎯 Simple Location Scraper")
+    st.markdown("Extract location data from websites using CSS selectors (Static Content Only)")
+    
+    # Warning about limitations
+    st.warning("""
+    ⚠️ **Important**: This version only works with static HTML content. 
+    For dynamic content (JavaScript-loaded), you'll need to install Selenium.
+    
+    To install Selenium: `pip install selenium webdriver-manager`
+    """)
     
     # Sidebar for configuration
     with st.sidebar:
@@ -283,19 +163,12 @@ def main():
             help="Enter the full URL of the website to scrape"
         )
         
-        # JavaScript selector input
-        js_selector = st.text_area(
-            "📍 JavaScript DOM Selector",
-            value='document.querySelector("#hbp-location-search > div.hbp-location-list")',
-            help="Enter the JavaScript code to select the DOM element containing locations",
+        # CSS selector input
+        css_selector = st.text_area(
+            "📍 CSS Selector",
+            value="#hbp-location-search > div.hbp-location-list",
+            help="Enter the CSS selector to find the location container",
             height=100
-        )
-        
-        # Search strategy
-        search_strategy = st.selectbox(
-            "🔍 Search Strategy",
-            ["comprehensive", "single_extraction"],
-            help="Comprehensive: Perform multiple searches to populate data. Single: Extract current page content only."
         )
         
         # Advanced options
@@ -310,12 +183,12 @@ def main():
         st.header("📊 Extraction Results")
         
         if st.button("🚀 Start Scraping", type="primary", use_container_width=True):
-            if not url or not js_selector:
-                st.error("Please provide both URL and JavaScript selector")
+            if not url or not css_selector:
+                st.error("Please provide both URL and CSS selector")
                 return
             
             with st.spinner("Scraping in progress..."):
-                locations = scrape_website(url, js_selector, search_strategy)
+                locations = scrape_static_content(url, css_selector)
             
             if locations:
                 st.success(f"✅ Successfully extracted {len(locations)} locations!")
@@ -341,7 +214,7 @@ def main():
                     st.metric("States", unique_states)
                 
                 with col_stats3:
-                    real_stores = len([l for l in locations if l.get('storeName', '').find('#') != -1 or l.get('storeName', '').find("'S") != -1])
+                    real_stores = len([l for l in locations if '#' in l.get('storeName', '') or "'S" in l.get('storeName', '')])
                     st.metric("Real Store Names", real_stores)
                 
                 with col_stats4:
@@ -369,7 +242,7 @@ def main():
                 # Download options
                 st.subheader("💾 Download Options")
                 
-                col_dl1, col_dl2, col_dl3 = st.columns(3)
+                col_dl1, col_dl2 = st.columns(2)
                 
                 with col_dl1:
                     # CSV download
@@ -396,48 +269,13 @@ def main():
                         use_container_width=True
                     )
                 
-                with col_dl3:
-                    # Excel download
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        df.to_excel(writer, sheet_name='Locations', index=False)
-                    excel_data = excel_buffer.getvalue()
-                    
-                    st.download_button(
-                        label="📊 Download Excel",
-                        data=excel_data,
-                        file_name=f"locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                
             else:
-                st.error("❌ No locations were extracted. Please check your URL and JavaScript selector.")
-    
-    with col2:
-        st.header("📖 Instructions")
-        
-        with st.expander("🎯 How to Use", expanded=True):
-            st.markdown("""
-            1. **Enter Website URL**: The full URL of the page containing locations
-            2. **JavaScript Selector**: The DOM selector to find the location container
-            3. **Choose Search Strategy**: 
-               - **Comprehensive**: Performs multiple searches to load all data
-               - **Single**: Extracts only currently visible data
-            4. **Click Start Scraping**: Begin the extraction process
-            5. **Download Results**: Get your data in CSV, JSON, or Excel format
-            """)
-        
-        with st.expander("💡 Tips"):
-            st.markdown("""
-            - Use browser developer tools to find the correct DOM selector
-            - For dynamic content, use "Comprehensive" search strategy
-            - The scraper will try multiple search terms to populate all locations
-            - Check the sample results to verify data quality
-            """)
-        
-        with st.expander("🔧 JavaScript Selector Examples"):
-            st.code('document.querySelector("#locations-list")')
-            st.code('document.querySelector(".store-locator-results")')
-            st.code('document.querySelectorAll(".location-item")')
-            st.code('document.querySelector("#hbp-location-search > div.hbp-location-list")')
+                st.error("❌ No locations were extracted. This might be because:")
+                st.markdown("""
+                - The website loads content dynamically with JavaScript
+                - The CSS selector is incorrect
+                - The website blocks automated requests
+                
+                **Solution**: Install Selenium for dynamic content scraping:
+                ```bash
+                pip install selenium webdriver-manager
