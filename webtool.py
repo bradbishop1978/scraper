@@ -441,10 +441,3 @@ def main():
             st.code('document.querySelector(".store-locator-results")')
             st.code('document.querySelectorAll(".location-item")')
             st.code('document.querySelector("#hbp-location-search > div.hbp-location-list")')
-        
-        # System requirements
-        st.header("⚙️ Requirements")
-        st.markdown("""
-        **Required Python packages:**
-        ```bash
-        pip install streamlit selenium beautifulsoup4 pandas openpyxl
