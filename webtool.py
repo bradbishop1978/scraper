@@ -61,15 +61,9 @@ def robot_search_locations(driver, search_terms, progress_bar, status_text):
         )
         time.sleep(3)  # Extra wait for dynamic content
         
-        # Step 3: Robot looks for the search box
-        status_text.text("🔍 Robot is looking for the search box...")
-        search_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="text"], input[placeholder*="address"], input[placeholder*="zip"]'))
-        )
+        status_text.text("✅ Website loaded successfully!")
         
-        status_text.text("✅ Robot found the search box!")
-        
-        # Step 4: Robot searches using different terms
+        # Step 3: Robot searches using different terms
         total_searches = len(search_terms)
         
         for i, search_term in enumerate(search_terms):
@@ -79,25 +73,37 @@ def robot_search_locations(driver, search_terms, progress_bar, status_text):
             status_text.text(f"🤖 Robot is searching for: '{search_term}' ({i+1}/{total_searches})")
             
             try:
+                # Robot finds the search box fresh each time (fixes stale element issue)
+                search_input = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, 'input[type="text"], input[placeholder*="address"], input[placeholder*="zip"]'))
+                )
+                
                 # Robot clears the search box and types new search term
                 search_input.clear()
+                time.sleep(0.5)  # Small pause after clearing
+                
                 if search_term:  # Don't type anything for empty search
                     search_input.send_keys(search_term)
+                    time.sleep(0.5)  # Small pause after typing
                 
                 # Robot presses Enter (like you pressing Enter key)
                 search_input.send_keys(Keys.RETURN)
                 
                 # Robot waits for results to load
-                time.sleep(3)
+                time.sleep(4)  # Increased wait time for results
                 
                 # Robot checks if location list appeared
                 try:
-                    WebDriverWait(driver, 5).until(
+                    WebDriverWait(driver, 8).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR, ".hbp-location-list"))
                     )
+                    status_text.text(f"✅ Found results for '{search_term}'")
                 except TimeoutException:
-                    pass  # Continue even if specific element not found
+                    status_text.text(f"⏰ No results found for '{search_term}', continuing...")
                 
+            except TimeoutException:
+                st.warning(f"⏰ Robot couldn't find search box for '{search_term}', skipping...")
+                continue
             except Exception as e:
                 st.warning(f"⚠️ Robot had trouble with search '{search_term}': {str(e)}")
                 continue
@@ -108,6 +114,19 @@ def robot_search_locations(driver, search_terms, progress_bar, status_text):
     except Exception as e:
         st.error(f"❌ Robot encountered an error: {str(e)}")
         return False
+
+def robot_wait_and_find_element(driver, selector, timeout=10):
+    """Helper function to find elements with better error handling"""
+    try:
+        element = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+        )
+        return element
+    except TimeoutException:
+        return None
+    except Exception as e:
+        st.warning(f"Error finding element: {str(e)}")
+        return None
 
 def robot_extract_html(driver):
     """Robot copies all the location data from the website"""
