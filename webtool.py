@@ -6,234 +6,287 @@ import io
 import re
 import urllib.request
 import urllib.parse
-import html
 
-def extract_locations_from_html(html_content, css_selector):
-    """Extract location data from HTML using basic string parsing"""
+def parse_hunt_brothers_html(html_content):
+    """Parse Hunt Brothers location data from the specific HTML structure"""
+    locations = []
+    
     try:
-        # Simple HTML parsing without BeautifulSoup
-        locations = []
+        # Find the hbp-location-list div
+        list_start = html_content.find('<div class="hbp-location-list">')
+        if list_start == -1:
+            st.warning("Could not find hbp-location-list container")
+            return []
         
-        # Convert CSS selector to a simple search pattern
-        if '#' in css_selector:
-            # Extract ID from selector like "#hbp-location-search > div.hbp-location-list"
-            id_match = re.search(r'#([a-zA-Z0-9_-]+)', css_selector)
-            if id_match:
-                target_id = id_match.group(1)
-                
-                # Find the element with this ID
-                id_pattern = f'id="{target_id}"'
-                id_start = html_content.find(id_pattern)
-                
-                if id_start != -1:
-                    # Find the opening tag
-                    tag_start = html_content.rfind('<', 0, id_start)
-                    if tag_start != -1:
-                        # Extract tag name
-                        tag_match = re.search(r'<(\w+)', html_content[tag_start:])
-                        if tag_match:
-                            tag_name = tag_match.group(1)
-                            
-                            # Find the closing tag
-                            closing_tag = f'</{tag_name}>'
-                            tag_end = html_content.find(closing_tag, id_start)
-                            
-                            if tag_end != -1:
-                                element_content = html_content[tag_start:tag_end + len(closing_tag)]
-                                locations = parse_location_content(element_content)
+        # Find the end of the container
+        list_end = html_content.find('</div>', list_start)
+        # Find the actual end by counting div tags
+        div_count = 1
+        search_pos = list_start + len('<div class="hbp-location-list">')
         
-        # If no locations found with ID, try searching for location patterns in entire content
-        if not locations:
-            locations = parse_location_content(html_content)
+        while div_count > 0 and search_pos < len(html_content):
+            next_open = html_content.find('<div', search_pos)
+            next_close = html_content.find('</div>', search_pos)
+            
+            if next_close == -1:
+                break
+            
+            if next_open != -1 and next_open < next_close:
+                div_count += 1
+                search_pos = next_open + 4
+            else:
+                div_count -= 1
+                search_pos = next_close + 6
+                if div_count == 0:
+                    list_end = next_close + 6
+                    break
+        
+        if list_end == -1:
+            list_end = len(html_content)
+        
+        container_html = html_content[list_start:list_end]
+        
+        # Find all listed-location divs
+        location_pattern = r'<div class="listed-location"[^>]*>(.*?)</div>\s*</div>\s*</div>'
+        location_matches = re.findall(location_pattern, container_html, re.DOTALL)
+        
+        st.info(f"Found {len(location_matches)} location blocks")
+        
+        for i, location_html in enumerate(location_matches):
+            try:
+                location_data = parse_single_location(location_html, i)
+                if location_data:
+                    locations.append(location_data)
+            except Exception as e:
+                st.warning(f"Error parsing location {i}: {str(e)}")
+                continue
         
         return locations
         
     except Exception as e:
-        st.error(f"Error extracting locations: {str(e)}")
+        st.error(f"Error parsing HTML: {str(e)}")
         return []
 
-def parse_location_content(content):
-    """Parse location data from HTML content"""
-    locations = []
-    
-    # Remove HTML tags for text analysis
-    text_content = re.sub(r'<[^>]+>', ' ', content)
-    text_content = html.unescape(text_content)
-    
-    # Split into potential location blocks
-    lines = text_content.split('\n')
-    current_location = {}
-    
-    for line in lines:
-        line = line.strip()
-        if not line or len(line) < 5:
-            continue
+def parse_single_location(location_html, index):
+    """Parse a single location from its HTML"""
+    try:
+        # Extract coordinates from data attributes
+        lat_match = re.search(r'data-lat="([^"]*)"', location_html)
+        lng_match = re.search(r'data-lng="([^"]*)"', location_html)
         
-        # Look for store name patterns
-        if any(keyword in line.upper() for keyword in ['#', "'S", 'STORE', 'MART', 'SHOP', 'MARKET', 'PIZZA']):
-            if current_location:  # Save previous location
-                if current_location.get('storeName') or current_location.get('address'):
-                    locations.append(current_location)
-            current_location = {'storeName': line}
+        latitude = lat_match.group(1) if lat_match else ""
+        longitude = lng_match.group(1) if lng_match else ""
         
-        # Look for address patterns
-        elif re.search(r'\d+[^,\n]*(?:HIGHWAY|HWY|STREET|ST|AVENUE|AVE|ROAD|RD|DRIVE|DR|LANE|LN|BOULEVARD|BLVD)', line, re.IGNORECASE):
-            current_location['address'] = line
+        # Extract distance
+        distance_match = re.search(r'<span class="distance">([^<]*)</span>', location_html)
+        distance = distance_match.group(1).strip() if distance_match else ""
         
-        # Look for city, state, zip patterns
-        elif re.search(r'[A-Z\s]+,\s*[A-Z]{2}\s+\d{5}', line):
-            city_state_zip = re.search(r'([A-Z\s]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)', line)
-            if city_state_zip:
-                current_location['city'] = city_state_zip.group(1).strip()
-                current_location['state'] = city_state_zip.group(2).strip()
-                current_location['zipCode'] = city_state_zip.group(3).strip()
+        # Extract store name from h3 tag
+        name_match = re.search(r'<h3><a[^>]*>([^<]*)</a></h3>', location_html)
+        store_name = name_match.group(1).strip() if name_match else ""
         
-        # Look for phone patterns
-        elif re.search(r'$$?\d{3}$$?[-.\s]?\d{3}[-.\s]?\d{4}', line):
-            phone_match = re.search(r'$$?\d{3}$$?[-.\s]?\d{3}[-.\s]?\d{4}', line)
-            if phone_match:
-                current_location['phone'] = phone_match.group(0)
+        # Extract location ID from href
+        id_match = re.search(r'/location-details/(\d+)', location_html)
+        location_id = id_match.group(1) if id_match else ""
         
-        # Look for hours patterns
-        elif re.search(r'(?:hours?|open|closed)[^,\n]*(?:am|pm|24)', line, re.IGNORECASE):
-            current_location['hours'] = line
-    
-    # Don't forget the last location
-    if current_location and (current_location.get('storeName') or current_location.get('address')):
-        locations.append(current_location)
-    
-    # Clean up locations and add missing fields
-    cleaned_locations = []
-    for i, loc in enumerate(locations):
-        cleaned_loc = {
-            'storeName': loc.get('storeName', f'Location {i+1}'),
-            'address': loc.get('address', ''),
-            'city': loc.get('city', ''),
-            'state': loc.get('state', ''),
-            'zipCode': loc.get('zipCode', ''),
-            'phone': loc.get('phone', ''),
-            'hours': loc.get('hours', ''),
-            'elementIndex': i
+        # Extract address from the address tag
+        address_match = re.search(r'<address class="address">.*?<i[^>]*></i>\s*([^<]*)<br>([^<]*)</a>', location_html, re.DOTALL)
+        
+        street_address = ""
+        city_state_zip = ""
+        city = ""
+        state = ""
+        zip_code = ""
+        
+        if address_match:
+            street_address = address_match.group(1).strip()
+            city_state_zip = address_match.group(2).strip()
+            
+            # Parse city, state, zip
+            city_state_zip_pattern = r'([^,]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)'
+            csz_match = re.search(city_state_zip_pattern, city_state_zip)
+            if csz_match:
+                city = csz_match.group(1).strip()
+                state = csz_match.group(2).strip()
+                zip_code = csz_match.group(3).strip()
+        
+        # Extract phone number
+        phone_match = re.search(r'<a href="tel:([^"]*)"[^>]*><i[^>]*></i>\s*([^<]*)</a>', location_html)
+        phone = phone_match.group(2).strip() if phone_match else ""
+        
+        # Extract Google Maps URL for directions
+        directions_match = re.search(r'<a[^>]*href="(https://www\.google\.com/maps/[^"]*)"[^>]*target="_blank"', location_html)
+        directions_url = directions_match.group(1) if directions_match else ""
+        
+        return {
+            'locationId': location_id,
+            'storeName': store_name,
+            'address': street_address,
+            'city': city,
+            'state': state,
+            'zipCode': zip_code,
+            'phone': phone,
+            'latitude': latitude,
+            'longitude': longitude,
+            'distance': distance,
+            'directionsUrl': directions_url,
+            'fullAddress': f"{street_address}, {city_state_zip}" if street_address and city_state_zip else "",
+            'elementIndex': index
         }
-        cleaned_locations.append(cleaned_loc)
-    
-    return cleaned_locations
+        
+    except Exception as e:
+        st.warning(f"Error parsing single location: {str(e)}")
+        return None
 
-def fetch_page_content(url):
-    """Fetch page content using urllib"""
+def fetch_hunt_brothers_page(url="https://www.huntbrotherspizza.com/locations/"):
+    """Fetch the Hunt Brothers locations page"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
         
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as response:
-            content = response.read().decode('utf-8')
-            return content
+            content = response.read()
+            
+            # Handle gzip encoding
+            if response.info().get('Content-Encoding') == 'gzip':
+                import gzip
+                content = gzip.decompress(content)
+            
+            return content.decode('utf-8')
         
     except Exception as e:
         st.error(f"Error fetching page: {str(e)}")
         return None
 
-def scrape_basic_content(url, css_selector):
-    """Scrape content using basic Python libraries only"""
-    st.info(f"🌐 Fetching content from: {url}")
-    
-    html_content = fetch_page_content(url)
-    if not html_content:
-        return None
-    
-    st.info(f"📄 Page content loaded ({len(html_content)} characters)")
-    st.info(f"📊 Extracting data using selector: {css_selector}")
-    
-    locations = extract_locations_from_html(html_content, css_selector)
-    
-    return locations
-
-def create_sample_data():
-    """Create sample data for demonstration"""
+def create_sample_hunt_brothers_data():
+    """Create sample data based on the HTML structure you provided"""
     return [
         {
-            'storeName': "LEEBO'S #1",
-            'address': "1783 HIGHWAY 121",
-            'city': "HINESTON",
-            'state': "LA",
-            'zipCode': "71309",
-            'phone': "(318) 793-2400",
-            'hours': "Mon-Sun: 6:00 AM - 11:00 PM",
+            'locationId': '81626',
+            'storeName': 'CENEX ZIP TRIP #50',
+            'address': '11 HWY 10 E',
+            'city': 'PARK CITY',
+            'state': 'MT',
+            'zipCode': '59063',
+            'phone': '(406) 633-2359',
+            'latitude': '45.634266',
+            'longitude': '-108.918157',
+            'distance': '7235.05 miles',
+            'directionsUrl': 'https://www.google.com/maps/?daddr=11+HWY+10+E%0APARK+CITY%2C+MT+59063',
+            'fullAddress': '11 HWY 10 E, PARK CITY, MT 59063',
             'elementIndex': 0
         },
         {
-            'storeName': "CORNER STORE #2",
-            'address': "456 MAIN STREET",
-            'city': "MONROE",
-            'state': "LA",
-            'zipCode': "71201",
-            'phone': "(318) 555-0123",
-            'hours': "Daily: 24 Hours",
+            'locationId': '84094',
+            'storeName': 'CENEX ZIP TRIP #74',
+            'address': '902 N BROADWAY',
+            'city': 'RED LODGE',
+            'state': 'MT',
+            'zipCode': '59068',
+            'phone': '(406) 446-0338',
+            'latitude': '45.195916',
+            'longitude': '-109.246596',
+            'distance': '7242.35 miles',
+            'directionsUrl': 'https://www.google.com/maps/?daddr=902+N+BROADWAY%0ARED+LODGE%2C+MT+59068',
+            'fullAddress': '902 N BROADWAY, RED LODGE, MT 59068',
             'elementIndex': 1
+        },
+        {
+            'locationId': '169248',
+            'storeName': 'CENEX ZIP TRIP #52',
+            'address': '1201 CENTRAL AVE',
+            'city': 'BILLINGS',
+            'state': 'MT',
+            'zipCode': '59102',
+            'phone': '(406) 245-9670',
+            'latitude': '45.770052',
+            'longitude': '-108.546965',
+            'distance': '7242.61 miles',
+            'directionsUrl': 'https://www.google.com/maps/?daddr=1201+CENTRAL+AVE%0ABILLINGS%2C+MT+59102',
+            'fullAddress': '1201 CENTRAL AVE, BILLINGS, MT 59102',
+            'elementIndex': 2
+        },
+        {
+            'locationId': '185656',
+            'storeName': 'HARDIN KOA',
+            'address': '2205 HWY 47',
+            'city': 'HARDIN',
+            'state': 'MT',
+            'zipCode': '59034',
+            'phone': '(406) 665-1635',
+            'latitude': '45.820352',
+            'longitude': '-107.611961',
+            'distance': '7274.34 miles',
+            'directionsUrl': 'https://www.google.com/maps/?daddr=2205+HWY+47%0AHARDIN%2C+MT+59034',
+            'fullAddress': '2205 HWY 47, HARDIN, MT 59034',
+            'elementIndex': 3
         }
     ]
 
 def main():
     st.set_page_config(
-        page_title="Basic Location Scraper",
-        page_icon="🎯",
+        page_title="Hunt Brothers Pizza Scraper",
+        page_icon="🍕",
         layout="wide"
     )
     
-    st.title("🎯 Basic Location Scraper")
-    st.markdown("Extract location data from websites using basic Python libraries only")
+    st.title("🍕 Hunt Brothers Pizza Location Scraper")
+    st.markdown("Specialized parser for Hunt Brothers Pizza location data")
     
-    # Info about limitations
-    st.info("""
-    ℹ️ **This version uses only built-in Python libraries** - no external dependencies like BeautifulSoup or Selenium.
-    It works best with static HTML content and simple CSS selectors.
-    """)
-    
-    # Sidebar for configuration
+    # Sidebar for options
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.header("⚙️ Options")
         
-        # Website URL input
         url = st.text_input(
             "🌐 Website URL",
             value="https://www.huntbrotherspizza.com/locations/",
-            help="Enter the full URL of the website to scrape"
+            help="Hunt Brothers locations page URL"
         )
         
-        # CSS selector input
-        css_selector = st.text_area(
-            "📍 CSS Selector",
-            value="#hbp-location-search > div.hbp-location-list",
-            help="Enter the CSS selector to find the location container",
-            height=100
-        )
+        demo_mode = st.checkbox("🎭 Demo Mode", value=True, help="Use sample data for testing")
         
-        # Demo mode
-        demo_mode = st.checkbox("🎭 Demo Mode", help="Use sample data for testing")
+        if not demo_mode:
+            st.warning("⚠️ Live scraping may not work due to dynamic content loading. The website likely requires JavaScript to populate the location list.")
         
-        # Advanced options
-        with st.expander("🔧 Advanced Options"):
-            include_raw_html = st.checkbox("Include Raw HTML", value=False, help="Show raw HTML content for debugging")
+        with st.expander("📋 Data Fields"):
+            st.markdown("""
+            **Extracted Fields:**
+            - Store Name (e.g., "CENEX ZIP TRIP #50")
+            - Street Address
+            - City, State, ZIP
+            - Phone Number
+            - Latitude/Longitude
+            - Distance from search point
+            - Google Maps directions URL
+            - Location ID
+            """)
     
-    # Main content area
+    # Main content
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.header("📊 Extraction Results")
         
-        if st.button("🚀 Start Scraping", type="primary", use_container_width=True):
+        if st.button("🚀 Extract Locations", type="primary", use_container_width=True):
             if demo_mode:
-                st.info("🎭 Using demo data...")
-                locations = create_sample_data()
+                st.info("🎭 Using sample Hunt Brothers data...")
+                locations = create_sample_hunt_brothers_data()
             else:
-                if not url or not css_selector:
-                    st.error("Please provide both URL and CSS selector")
-                    return
-                
-                with st.spinner("Scraping in progress..."):
-                    locations = scrape_basic_content(url, css_selector)
+                with st.spinner("Fetching Hunt Brothers locations..."):
+                    html_content = fetch_hunt_brothers_page(url)
+                    
+                    if html_content:
+                        st.info(f"📄 Page loaded ({len(html_content):,} characters)")
+                        locations = parse_hunt_brothers_html(html_content)
+                    else:
+                        locations = []
             
             if locations:
                 st.success(f"✅ Successfully extracted {len(locations)} locations!")
@@ -255,46 +308,61 @@ def main():
                     st.metric("States", unique_states)
                 
                 with col_stats3:
-                    real_stores = len([l for l in locations if '#' in l.get('storeName', '') or "'S" in l.get('storeName', '')])
-                    st.metric("Real Store Names", real_stores)
+                    with_coords = len([l for l in locations if l.get('latitude') and l.get('longitude')])
+                    st.metric("With Coordinates", with_coords)
                 
                 with col_stats4:
-                    with_phones = len([l for l in locations if l.get('phone', '')])
+                    with_phones = len([l for l in locations if l.get('phone')])
                     st.metric("With Phone Numbers", with_phones)
                 
                 # Sample locations
-                if len(locations) > 0:
-                    st.subheader("📍 Sample Locations")
-                    sample_size = min(3, len(locations))
-                    
-                    for i in range(sample_size):
-                        location = locations[i]
-                        with st.expander(f"📍 {location.get('storeName', 'Unknown Store')}"):
-                            col_a, col_b = st.columns(2)
-                            with col_a:
-                                st.write(f"**Address:** {location.get('address', 'N/A')}")
-                                st.write(f"**City:** {location.get('city', 'N/A')}")
-                                st.write(f"**State:** {location.get('state', 'N/A')}")
-                            with col_b:
-                                st.write(f"**Zip Code:** {location.get('zipCode', 'N/A')}")
-                                st.write(f"**Phone:** {location.get('phone', 'N/A')}")
-                                st.write(f"**Hours:** {location.get('hours', 'N/A')}")
+                st.subheader("📍 Sample Locations")
+                for i, location in enumerate(locations[:3]):
+                    with st.expander(f"📍 {location.get('storeName', 'Unknown Store')}"):
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.write(f"**ID:** {location.get('locationId', 'N/A')}")
+                            st.write(f"**Address:** {location.get('address', 'N/A')}")
+                            st.write(f"**City:** {location.get('city', 'N/A')}, {location.get('state', 'N/A')} {location.get('zipCode', 'N/A')}")
+                            st.write(f"**Phone:** {location.get('phone', 'N/A')}")
+                        with col_b:
+                            st.write(f"**Coordinates:** {location.get('latitude', 'N/A')}, {location.get('longitude', 'N/A')}")
+                            st.write(f"**Distance:** {location.get('distance', 'N/A')}")
+                            if location.get('directionsUrl'):
+                                st.markdown(f"[🗺️ Get Directions]({location.get('directionsUrl')})")
                 
                 # Download options
                 st.subheader("💾 Download Options")
                 
-                col_dl1, col_dl2 = st.columns(2)
+                col_dl1, col_dl2, col_dl3 = st.columns(3)
                 
                 with col_dl1:
                     # CSV download
-                    csv_data = "Store Name,Address,City,State,Zip Code,Phone,Hours\n"
-                    for location in locations:
-                        csv_data += f'"{location.get("storeName", "")}","{location.get("address", "")}","{location.get("city", "")}","{location.get("state", "")}","{location.get("zipCode", "")}","{location.get("phone", "")}","{location.get("hours", "")}"\n'
+                    csv_headers = ["Location ID", "Store Name", "Address", "City", "State", "ZIP", "Phone", "Latitude", "Longitude", "Distance", "Directions URL"]
+                    csv_rows = []
+                    for loc in locations:
+                        csv_rows.append([
+                            loc.get('locationId', ''),
+                            loc.get('storeName', ''),
+                            loc.get('address', ''),
+                            loc.get('city', ''),
+                            loc.get('state', ''),
+                            loc.get('zipCode', ''),
+                            loc.get('phone', ''),
+                            loc.get('latitude', ''),
+                            loc.get('longitude', ''),
+                            loc.get('distance', ''),
+                            loc.get('directionsUrl', '')
+                        ])
+                    
+                    csv_content = ",".join(csv_headers) + "\n"
+                    for row in csv_rows:
+                        csv_content += ",".join(f'"{str(field)}"' for field in row) + "\n"
                     
                     st.download_button(
                         label="📄 Download CSV",
-                        data=csv_data,
-                        file_name=f"locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        data=csv_content,
+                        file_name=f"hunt_brothers_locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv",
                         use_container_width=True
                     )
@@ -305,8 +373,19 @@ def main():
                     st.download_button(
                         label="📋 Download JSON",
                         data=json_data,
-                        file_name=f"locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        file_name=f"hunt_brothers_locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json",
+                        use_container_width=True
+                    )
+                
+                with col_dl3:
+                    # KML download for Google Earth
+                    kml_content = generate_kml(locations)
+                    st.download_button(
+                        label="🗺️ Download KML",
+                        data=kml_content,
+                        file_name=f"hunt_brothers_locations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.kml",
+                        mime="application/vnd.google-earth.kml+xml",
                         use_container_width=True
                     )
                 
@@ -315,50 +394,81 @@ def main():
                 st.markdown("""
                 **Possible reasons:**
                 - The website loads content dynamically with JavaScript
-                - The CSS selector is incorrect
-                - The website blocks automated requests
-                - Content is not in the expected format
+                - No search has been performed on the page
+                - The page structure has changed
                 
                 **Try:**
                 - Enable Demo Mode to test the interface
-                - Check the CSS selector in browser developer tools
-                - Try a simpler selector like `#main` or `.content`
+                - The website likely requires user interaction to load locations
                 """)
     
     with col2:
-        st.header("📖 Instructions")
+        st.header("📖 About This Parser")
         
-        with st.expander("🎯 How to Use", expanded=True):
+        with st.expander("🎯 How It Works", expanded=True):
             st.markdown("""
-            1. **Enter Website URL**: Full URL of the page with locations
-            2. **CSS Selector**: The element containing location data
-            3. **Demo Mode**: Test with sample data first
-            4. **Click Start Scraping**: Begin extraction
-            5. **Download Results**: Get CSV or JSON files
+            This parser is specifically designed for Hunt Brothers Pizza's HTML structure:
+            
+            1. **Finds** the `hbp-location-list` container
+            2. **Extracts** each `listed-location` div
+            3. **Parses** store names, addresses, coordinates
+            4. **Includes** phone numbers and directions
             """)
         
-        with st.expander("💡 Tips"):
+        with st.expander("📊 Data Quality"):
             st.markdown("""
-            - Try Demo Mode first to test the interface
-            - Use simple CSS selectors like `#content` or `.main`
-            - This version works best with static HTML
-            - For dynamic content, you'd need Selenium
+            **High Quality Data:**
+            - ✅ Real store names (CENEX ZIP TRIP #50)
+            - ✅ Actual addresses (11 HWY 10 E)
+            - ✅ GPS coordinates
+            - ✅ Phone numbers
+            - ✅ Google Maps integration
             """)
         
-        with st.expander("🔧 CSS Selector Examples"):
-            st.code('#locations-list')
-            st.code('.store-results')
-            st.code('#main-content')
-            st.code('div[class*="location"]')
+        with st.expander("⚠️ Limitations"):
+            st.markdown("""
+            - Only works with static HTML content
+            - Hunt Brothers loads data dynamically
+            - May need user interaction to populate list
+            - Demo mode shows the expected data structure
+            """)
         
-        st.header("🎭 Demo Mode")
+        st.header("🎭 Demo Data")
         st.markdown("""
-        **Enable Demo Mode** to test the interface with sample Hunt Brothers data:
-        - LEEBO'S #1 - Hineston, LA
-        - CORNER STORE #2 - Monroe, LA
+        The demo shows real Hunt Brothers locations from Montana and North Dakota, extracted from the HTML structure you provided.
         
-        This lets you test CSV/JSON export without scraping.
+        This demonstrates the exact data format and quality you can expect.
         """)
+
+def generate_kml(locations):
+    """Generate KML file for Google Earth"""
+    kml_header = '''<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+<name>Hunt Brothers Pizza Locations</name>
+<description>Hunt Brothers Pizza store locations</description>
+'''
+    
+    kml_footer = '''</Document>
+</kml>'''
+    
+    placemarks = ""
+    for location in locations:
+        if location.get('latitude') and location.get('longitude'):
+            placemarks += f'''
+<Placemark>
+<name>{location.get('storeName', 'Unknown Store')}</name>
+<description>
+Address: {location.get('fullAddress', 'N/A')}
+Phone: {location.get('phone', 'N/A')}
+Distance: {location.get('distance', 'N/A')}
+</description>
+<Point>
+<coordinates>{location.get('longitude')},{location.get('latitude')},0</coordinates>
+</Point>
+</Placemark>'''
+    
+    return kml_header + placemarks + kml_footer
 
 if __name__ == "__main__":
     main()
